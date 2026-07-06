@@ -7,7 +7,7 @@ from nn import Network, Layer, Activation
 """
 
 from .activation import Activation
-from .layer   import Layer , _DenseSpec
+from .layer   import Layer
 from .network import Network
 
-__all__ = ["Network", "Layer", "Activation", "_DenseSpec"]
+__all__ = ["Network", "Layer", "Activation"]

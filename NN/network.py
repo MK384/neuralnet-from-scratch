@@ -1,86 +1,74 @@
-import numpy as np
-from NN import Layer , _DenseSpec
+"""
+network.py
+----------
+Network class — stacks any mix of layer types and runs the training loop.
+"""
 
+import numpy as np
+from layer import DenseLayer
 
 class Network:
     """
-    A fully-connected feedforward neural network.
+    A neural network that accepts any sequence of layer types:
+    Conv2D, MaxPool, Flatten, Dense — in any valid order.
 
-    Usage — MSE + Sigmoid (default)
-    --------------------------------
+    Usage — CNN for image classification
+    -------------------------------------
         net = Network(
-            input_size=784,
+            input_shape=(1, 28, 28),
             layers=[
-                Layer.Dense(16, activation=Activation("sigmoid")),
-                Layer.Dense(16, activation=Activation("sigmoid")),
-                Layer.Dense(10, activation=Activation("sigmoid")),
-            ]
-        )
-
-    Usage — Cross-Entropy + Softmax
-    --------------------------------
-        net = Network(
-            input_size=784,
-            layers=[
-                Layer.Dense(16, activation=Activation("relu")),
-                Layer.Dense(16, activation=Activation("relu")),
+                Layer.Conv2D(8,  kernel_size=3, activation=Activation("relu")),
+                Layer.MaxPool(pool_size=2),
+                Layer.Flatten(),
+                Layer.Dense(64, activation=Activation("relu")),
                 Layer.Dense(10, activation=Activation("softmax")),
             ],
             loss="cross_entropy"
         )
 
-    Supported loss values
-    ---------------------
-        "mse"            — Mean Squared Error  (default)
-        "cross_entropy"  — Categorical Cross-Entropy (requires Softmax output)
+    Usage — MLP (backward compatible)
+    -----------------------------------
+        net = Network(
+            input_shape=(784,),
+            layers=[
+                Layer.Dense(128, activation=Activation("relu")),
+                Layer.Dense(10,  activation=Activation("softmax")),
+            ],
+            loss="cross_entropy"
+        )
+
+    input_shape
+    -----------
+    1-D inputs (MLP):  (features,)           e.g. (784,)
+    2-D image inputs:  (channels, H, W)      e.g. (1, 28, 28)
     """
 
     SUPPORTED_LOSSES = ("mse", "cross_entropy")
 
-    def __init__(self, input_size: int, layers: list, loss: str = "mse"):
-        """
-        Parameters
-        ----------
-        input_size : number of input features (e.g. 784 for MNIST)
-        layers     : list of Layer.Dense(...) specs, ordered input → output
-        loss       : "mse" or "cross_entropy"
-        """
-        # ── Validate loss ─────────────────────────────────────────────────
+    def __init__(self, input_shape: tuple, layers: list, loss: str = "mse"):
         if loss not in self.SUPPORTED_LOSSES:
             raise ValueError(
-                f"Unknown loss '{loss}'. "
-                f"Choose from: {self.SUPPORTED_LOSSES}"
+                f"Unknown loss '{loss}'. Choose from: {self.SUPPORTED_LOSSES}"
             )
         self.loss = loss
 
-        # ── Build layers from specs ───────────────────────────────────────
-        # Each spec knows n_out and activation but not n_in.
-        # We chain sizes: input_size → spec[0].n_out → spec[1].n_out → ...
-        self.layers = []
-        n_in = input_size
-        for spec in layers:
-            if isinstance(spec, _DenseSpec):
-                layer = spec.build(n_in)
-            elif isinstance(spec, Layer):
-                # Allow pre-built Layer objects too, for flexibility
-                layer = spec
-            else:
-                raise TypeError(
-                    f"Expected Layer.Dense(...) or Layer, got {type(spec)}. "
-                    f"Use Layer.Dense(n_out, activation=...) to define layers."
-                )
-            self.layers.append(layer)
-            n_in = layer.W.shape[0]   # this layer's n_out becomes next layer's n_in
+        # ── Build layers by chaining shapes ───────────────────────────────
+        self.layers   = []
+        current_shape = input_shape   # updated after each layer is built
 
-        # ── Validate cross-entropy requires Softmax output ─────────────────
+        for spec in layers:
+            layer         = spec.build(current_shape)
+            current_shape = layer.output_shape
+            self.layers.append(layer)
+
+        # ── Validate cross-entropy requires softmax output ─────────────────
         if self.loss == "cross_entropy":
-            last_act = self.layers[-1].activation.name.lower()
-            if last_act != "softmax":
+            last = self.layers[-1]
+            if not (isinstance(last, DenseLayer) and
+                    last.activation.name.lower() == "softmax"):
                 raise ValueError(
-                    f"loss='cross_entropy' requires the last layer to use "
-                    f"Activation('softmax'), but got Activation('{last_act}'). "
-                    f"Either change the last layer's activation to 'softmax' "
-                    f"or switch to loss='mse'."
+                    "loss='cross_entropy' requires the last layer to be "
+                    "Dense with Activation('softmax')."
                 )
 
     # ---------------------------------------------------------------------- #
@@ -88,18 +76,6 @@ class Network:
     # ---------------------------------------------------------------------- #
 
     def forward(self, X: np.ndarray) -> np.ndarray:
-        """
-        Run a full forward pass through all layers.
-
-        Parameters
-        ----------
-        X : shape (n_in,) for a single sample or (batch, n_in) for a batch
-
-        Returns
-        -------
-        Output activations of the last layer.
-        shape (n_out,) or (batch, n_out)
-        """
         a = X
         for layer in self.layers:
             a = layer.forward(a)
@@ -109,63 +85,15 @@ class Network:
     # Cost functions                                                          #
     # ---------------------------------------------------------------------- #
 
-    def _cost(self, y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    def _cost(self, y_pred, y_true):
         if self.loss == "mse":
-            return self._mse(y_pred, y_true)
-        return self._cross_entropy(y_pred, y_true)
+            return np.mean((y_pred - y_true) ** 2)
+        y_c = np.clip(y_pred, 1e-12, 1.0 - 1e-12)
+        return -np.mean(np.sum(y_true * np.log(y_c), axis=-1))
 
-    def _cost_gradient(self, y_pred: np.ndarray, y_true: np.ndarray) -> np.ndarray:
+    def _cost_gradient(self, y_pred, y_true):
         if self.loss == "mse":
-            return self._mse_prime(y_pred, y_true)
-        return self._cross_entropy_softmax_gradient(y_pred, y_true)
-
-    # ── MSE ───────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _mse(y_pred: np.ndarray, y_true: np.ndarray) -> float:
-        return np.mean((y_pred - y_true) ** 2)
-
-    @staticmethod
-    def _mse_prime(y_pred: np.ndarray, y_true: np.ndarray) -> np.ndarray:
-        return 2 * (y_pred - y_true) / y_pred.shape[0]
-
-    # ── Cross-Entropy ─────────────────────────────────────────────────────
-
-    @staticmethod
-    def _cross_entropy(y_pred: np.ndarray, y_true: np.ndarray) -> float:
-        """
-        Categorical cross-entropy:
-            CE = -(1/N) Σ Σ y_true * log(y_pred)
-
-        Clipping y_pred prevents log(0) = -inf.
-        We clip to [1e-12, 1-1e-12] — small enough to never affect
-        the result meaningfully, large enough to keep log finite.
-        """
-        y_pred_clipped = np.clip(y_pred, 1e-12, 1.0 - 1e-12)
-        return -np.mean(np.sum(y_true * np.log(y_pred_clipped), axis=-1))
-
-    @staticmethod
-    def _cross_entropy_softmax_gradient(
-        y_pred: np.ndarray, y_true: np.ndarray
-    ) -> np.ndarray:
-        """
-        Combined gradient of CrossEntropy loss with respect to the
-        pre-activation z of the Softmax output layer.
-
-        Derivation
-        ----------
-        Normally backprop needs two steps at the output layer:
-            ∂CE/∂a  (cost w.r.t. softmax output)
-            ∂a/∂z   (softmax jacobian)
-
-        When you multiply them together, almost everything cancels and
-        you get this beautifully simple result:
-
-            ∂CE/∂z = y_pred - y_true   (divided by N for the batch mean)
-
-        This is one of the great mathematical gifts of pairing Softmax
-        with Cross-Entropy. The gradient is cleaner than MSE+Sigmoid.
-        """
+            return 2 * (y_pred - y_true) / y_pred.shape[0]
         N = y_pred.shape[0] if y_pred.ndim > 1 else 1
         return (y_pred - y_true) / N
 
@@ -173,22 +101,11 @@ class Network:
     # Backward pass                                                           #
     # ---------------------------------------------------------------------- #
 
-    def backward(self, y_pred: np.ndarray, y_true: np.ndarray) -> None:
-        """
-        Run backpropagation through all layers in reverse order.
-
-        For MSE: uses the standard backward() on every layer.
-        For cross-entropy: injects the combined gradient at the output
-        layer via backward_output_crossentropy(), then uses standard
-        backward() for all hidden layers.
-        """
+    def backward(self, y_pred, y_true):
         delta = self._cost_gradient(y_pred, y_true)
-
         for i, layer in enumerate(reversed(self.layers)):
-            is_output_layer = (i == 0)
-
-            if is_output_layer and self.loss == "cross_entropy":
-                # Combined Softmax+CE gradient — skip fn_prime
+            is_output = (i == 0)
+            if is_output and self.loss == "cross_entropy":
                 delta = layer.backward_output_crossentropy(delta)
             else:
                 delta = layer.backward(delta)
@@ -197,7 +114,7 @@ class Network:
     # Parameter update                                                        #
     # ---------------------------------------------------------------------- #
 
-    def update(self, lr: float) -> None:
+    def update(self, lr):
         for layer in self.layers:
             layer.update(lr)
 
@@ -205,60 +122,35 @@ class Network:
     # Training loop                                                           #
     # ---------------------------------------------------------------------- #
 
-    def train(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        epochs: int,
-        lr: float,
-        batch_size: int = 32,
-        verbose: bool = True,
-    ) -> list:
+    def train(self, X, y, epochs, lr, batch_size=32, verbose=True):
         """
-        Mini-batch gradient descent training loop.
+        Mini-batch gradient descent.
 
-        Parameters
-        ----------
-        X          : training inputs,  shape (N, n_in)
-        y          : training labels,  shape (N, n_out) — one-hot encoded
-        epochs     : number of full passes through the dataset
-        lr         : learning rate η
-        batch_size : samples per gradient update
-        verbose    : print cost every epoch if True
-
-        Returns
-        -------
-        history : list of per-epoch average costs
+        X : (N, features) for MLP  |  (N, C, H, W) for CNN
+        y : (N, n_classes) one-hot
         """
         N = X.shape[0]
         history = []
 
         for epoch in range(1, epochs + 1):
-            indices    = np.random.permutation(N)
-            X_shuffled = X[indices]
-            y_shuffled = y[indices]
-
+            idx        = np.random.permutation(N)
+            X_s, y_s   = X[idx], y[idx]
             epoch_cost = 0.0
             n_batches  = 0
 
             for start in range(0, N, batch_size):
-                end        = min(start + batch_size, N)
-                X_batch    = X_shuffled[start:end]
-                y_batch    = y_shuffled[start:end]
-
-                y_pred     = self.forward(X_batch)
-                batch_cost = self._cost(y_pred, y_batch)
-                self.backward(y_pred, y_batch)
+                end     = min(start + batch_size, N)
+                xb, yb  = X_s[start:end], y_s[start:end]
+                yp      = self.forward(xb)
+                epoch_cost += self._cost(yp, yb)
+                self.backward(yp, yb)
                 self.update(lr)
+                n_batches += 1
 
-                epoch_cost += batch_cost
-                n_batches  += 1
-
-            avg_cost = epoch_cost / n_batches
-            history.append(avg_cost)
-
+            avg = epoch_cost / n_batches
+            history.append(avg)
             if verbose:
-                print(f"Epoch {epoch:>4}/{epochs}  cost: {avg_cost:.6f}")
+                print(f"Epoch {epoch:>4}/{epochs}  cost: {avg:.6f}")
 
         return history
 
@@ -266,12 +158,10 @@ class Network:
     # Inference                                                               #
     # ---------------------------------------------------------------------- #
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Return predicted class index for each sample. Shape (N,)."""
+    def predict(self, X):
         return np.argmax(self.forward(X), axis=1)
 
-    def evaluate(self, X: np.ndarray, y: np.ndarray) -> float:
-        """Classification accuracy as a float in [0, 1]."""
+    def evaluate(self, X, y):
         return np.mean(self.predict(X) == np.argmax(y, axis=1))
 
     # ---------------------------------------------------------------------- #
@@ -280,131 +170,49 @@ class Network:
 
     def save(self, path: str) -> None:
         """
-        Save all learned parameters (weights and biases) to a .npz file.
-
-        What gets saved
-        ---------------
-        For each layer i we store two arrays:
-            "W_{i}" — weight matrix, shape (n_out, n_in)
-            "b_{i}" — bias vector,   shape (n_out,)
-
-        What does NOT get saved
-        -----------------------
-        The architecture (layer sizes, activations, loss type) is NOT saved.
-        It lives in your code where you define the Network. This is a
-        deliberate choice — mixing architecture with weights in one file
-        creates a dependency on Python's pickle format, which breaks across
-        versions and is a security risk. Keeping them separate means:
-            - weights file is just numbers, readable by any tool
-            - architecture is version-controlled alongside your code
-
-        Parameters
-        ----------
-        path : file path, e.g. "mnist_model.npz"
-               .npz extension is added automatically if omitted.
-
-        Usage
-        -----
-            net.save("mnist_model")          # saves to mnist_model.npz
-            net.save("models/checkpoint")    # saves to models/checkpoint.npz
+        Save all learnable parameters to a .npz file.
+        Parameterless layers (MaxPool, Flatten) contribute nothing to the file.
         """
         params = {}
         for i, layer in enumerate(self.layers):
-            params[f"W_{i}"] = layer.W
-            params[f"b_{i}"] = layer.b
+            for k, v in layer.get_params().items():
+                params[f"{i}_{k}"] = v
 
         np.savez(path, **params)
-        # np.savez appends .npz if not present — normalise for the message
-        display_path = path if path.endswith(".npz") else path + ".npz"
-        print(f"Model saved to '{display_path}'  "
-              f"({len(self.layers)} layers, "
-              f"{sum(l.W.size + l.b.size for l in self.layers):,} parameters)")
+        display = path if path.endswith(".npz") else path + ".npz"
+        n_params = sum(v.size for v in params.values())
+        print(f"Saved '{display}'  ({n_params:,} parameters)")
 
     def load(self, path: str) -> None:
-        """
-        Load parameters from a .npz file into the current network.
-
-        The network architecture must match the one that was saved —
-        same number of layers, same shapes. If they don't match, numpy
-        will raise a clear shape error when assigning W and b.
-
-        Parameters
-        ----------
-        path : file path, e.g. "mnist_model.npz"
-               .npz extension is added automatically if omitted.
-
-        Usage
-        -----
-            # Rebuild the same architecture, then load weights:
-            net = Network(
-                input_size=784,
-                layers=[
-                    Layer.Dense(128, activation=Activation("relu")),
-                    Layer.Dense(64,  activation=Activation("relu")),
-                    Layer.Dense(10,  activation=Activation("softmax")),
-                ],
-                loss="cross_entropy"
-            )
-            net.load("mnist_model")   # restores trained weights instantly
-            net.predict(x_test)       # ready to use, no training needed
-        """
-        display_path = path if path.endswith(".npz") else path + ".npz"
-        data = np.load(display_path)
-
-        # Validate that the file has the right number of layers
-        n_saved = sum(1 for k in data if k.startswith("W_"))
-        if n_saved != len(self.layers):
-            raise ValueError(
-                f"Architecture mismatch: file has {n_saved} layers "
-                f"but this network has {len(self.layers)} layers. "
-                f"Rebuild the network with the same architecture before loading."
-            )
+        """Restore learnable parameters from a .npz file."""
+        display = path if path.endswith(".npz") else path + ".npz"
+        data    = np.load(display)
 
         for i, layer in enumerate(self.layers):
-            W_saved = data[f"W_{i}"]
-            b_saved = data[f"b_{i}"]
+            expected_keys = list(layer.get_params().keys())
+            if not expected_keys:
+                continue
+            layer.set_params({k: data[f"{i}_{k}"] for k in expected_keys})
 
-            # Validate shape match before assigning
-            if W_saved.shape != layer.W.shape:
-                raise ValueError(
-                    f"Shape mismatch at layer {i}: "
-                    f"file has W shape {W_saved.shape} "
-                    f"but network expects {layer.W.shape}."
-                )
-
-            layer.W = W_saved
-            layer.b = b_saved
-
-        print(f"Model loaded from '{display_path}'  "
-              f"({len(self.layers)} layers, "
-              f"{sum(l.W.size + l.b.size for l in self.layers):,} parameters)")
+        n_params = sum(v.size for v in data.values())
+        print(f"Loaded '{display}'  ({n_params:,} parameters)")
 
     # ---------------------------------------------------------------------- #
     # Utility                                                                 #
     # ---------------------------------------------------------------------- #
 
-    def summary(self) -> None:
-        total_params = 0
-        print("=" * 58)
+    def summary(self):
+        total = 0
+        print("=" * 62)
         print(f"  Loss: {self.loss}")
-        print("=" * 58)
-        print(f"{'Layer':<8} {'Shape (n_in→n_out)':<22} {'Activation':<12} {'Params':>6}")
-        print("-" * 58)
-        for i, layer in enumerate(self.layers):
-            n_in   = layer.W.shape[1]
-            n_out  = layer.W.shape[0]
-            params = layer.W.size + layer.b.size
-            total_params += params
-            label  = "output" if i == len(self.layers) - 1 else f"hidden {i+1}"
-            print(f"  {label:<6} {str(n_in)+' → '+str(n_out):<22} "
-                  f"{layer.activation.name:<12} {params:>6}")
-        print("=" * 58)
-        print(f"{'Total parameters':<48} {total_params:>6}")
-        print("=" * 58)
-
-    def __repr__(self) -> str:
-        layer_str = " → ".join(
-            f"{l.W.shape[1]}({l.activation.name})" for l in self.layers
-        ) + f" → {self.layers[-1].W.shape[0]}"
-        total = sum(l.W.size + l.b.size for l in self.layers)
-        return f"Network({layer_str}, loss={self.loss}, total_params={total})"
+        print("=" * 62)
+        print(f"  {'Layer':<20} {'Output shape':<18} {'Params':>7}")
+        print("-" * 62)
+        for layer in self.layers:
+            params = sum(v.size for v in layer.get_params().values())
+            total += params
+            print(f"  {layer.__class__.__name__:<20} "
+                  f"{str(layer.output_shape):<18} {params:>7}")
+        print("=" * 62)
+        print(f"  {'Total parameters':<38} {total:>7}")
+        print("=" * 62)
