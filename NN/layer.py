@@ -15,8 +15,8 @@ Public API (via Layer factory):
 
 import numpy as np
 from scipy.signal import correlate2d
-from base_layer import BaseLayer
-from activation import Activation
+from  base_layer  import BaseLayer
+from  activation  import Activation
 
 # ══════════════════════════════════════════════════════════════════════════ #
 #  DenseLayer                                                                #

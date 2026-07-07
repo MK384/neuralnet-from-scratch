@@ -3,8 +3,8 @@ network.py — Network class with pluggable optimizer support.
 """
 
 import numpy as np
-from layer import DenseLayer
-from optimizer import SGD, BaseOptimizer
+from .layer import DenseLayer
+from .optimizer import SGD, BaseOptimizer
 
 
 class Network:
